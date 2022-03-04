@@ -1,0 +1,225 @@
+#!/bin/sh
+
+export POSIXLY_CORRECR=yes
+export LC_NUMERIC=en_US.UTF-8
+
+# simple function to write help
+print_help() {
+    echo "Usage: tradelog [-h |--help]"
+    echo "       tradelog [FILTER...][COMMAND][LOG...]"
+    echo ""
+    echo ""
+    echo "-FILTER is combination of:"
+    echo ""
+    echo "-a DATETIME"
+    echo "after: only records after this date are considered (without this date). DATETIME is in the format"
+    echo "YYYY-MM-DD HH: MM: SS"
+    echo ""
+    echo "-b DATETIME"
+    echo "before: only records BEFORE this date are considered (without this date)"
+    echo ""
+    echo "-t TICKER"
+    echo "only entries corresponding to a given ticker are considered. With multiple occurrences of the switch,"
+    echo "the set of all listed ticker is taken"
+    echo ""
+    echo "-w WIDTH"
+    echo "for a list of graphs, sets their width, ie the length of the longest line to WIDTH. Thus, WIDTH"
+    echo "must be a positive integer. Multiple occurrences of the switch is a faulty start."
+    echo ""
+    echo ""
+    echo "-COMMAND is one of:"
+    echo ""
+    echo "list-tick"
+    echo "a list of occurring stock exchange symbols, so-called Tickers"
+    echo ""
+    echo "profit"
+    echo "statement of total profit from closed positions"
+    echo ""
+    echo "pos"
+    echo "list of values of currently held positions sorted in descending order by value"
+    echo ""
+    echo "last-price"
+    echo "a listing of the last known price for each ticker"
+    echo ""
+    echo "hist-ord"
+    echo "histogram report of the number of transactions according to the ticker"
+    echo ""
+    echo "graph-pos"
+    echo "statement of graph of values of held positions according to the ticker"
+    echo ""
+    echo ""
+    echo "-h and --help print help with a brief description of each command and switch."
+}
+# stored values are here
+COMMAND=""
+
+DATETIME_A=""
+DATETIME_B="9999-12-31 23:59:59"
+TICKER=" "
+TICKER_FLAG=0
+WIDTH=""
+
+LOG_FILE=""
+LOG_FLAG=0
+
+# looks for input values and stores them
+while [ "$#" -gt 0 ]; do
+    case $1 in
+    # check all of the values below and saves only one of them if there is more error will appear
+    # command values
+    list-tick | profit | pos | last-price | hist-ord | graph-pos)
+    if
+    [ -z "$COMMAND" ]; then COMMAND="$1"
+    else
+    # for some reason this wont work with echo... printf used instead
+    printf "to much commands, for help try: -h or --h  \n"
+    exit 0
+    fi
+    shift
+    ;;
+  # prints help
+  -h | --h)
+    print_help
+    exit 0
+    ;;
+  # check for filter values
+  -a)
+    DATETIME_A="$2"
+    shift
+    shift
+    ;;
+  -b)
+    DATETIME_B="$2"
+    shift
+    shift
+    ;;
+  -t)
+    TICKER="$2|$TICKER"
+    TICKER_FLAG=1
+    shift
+    shift
+    ;;
+  -w)
+    WIDTH="$2"
+    shift
+    shift
+    ;;
+  # stores normal logs
+  *.log)
+    LOG_FILE="$LOG_FILE$(cat "$1")"
+    LOG_FLAG=1
+    shift
+    ;;
+  # unzip and stores .gz logs
+  *.gz)
+    LOG_FILE="$LOG_FILE$(gzip -d -c "$1")"
+    LOG_FLAG=1
+    shift
+    ;;
+  # if the input is incorrect this will appear
+  *)
+    echo "incorrect input or commands, for help try: -h or --h"
+    LOG_FLAG=1
+    exit 0
+    ;;
+  esac
+done
+
+#no input file
+if [ $LOG_FLAG -eq 0 ]; then
+    LOG_FILE=$(cat - )
+fi
+if [ $TICKER_FLAG -eq 0 ]; then
+    TICKER=".*"
+    else
+      TICKER="($TICKER)"
+fi
+
+# Filters all logs and saves them in FILTERED_LOG_FILE
+#if datetime is not set it still filters but there is no change
+TICKER_FILTER="awk -F ';' -v TICKER=\"^$TICKER\" '\$2 ~ TICKER {print}'"
+DATETIME_FILTER="awk -F ';' '{if ("\"$DATETIME_A"\"<\$1 && "\"$DATETIME_B"\">\$1) print}'"
+FILTERED_LOG_FILE='echo "$LOG_FILE" | eval "$DATETIME_FILTER" | eval "$TICKER_FILTER"'
+
+# Here we use our FILTERED_LOG_FILE process it
+case $COMMAND in
+    list-tick)
+        eval "$FILTERED_LOG_FILE" | awk -F ';' '{print $2}' | sort -u
+    ;;
+    profit)
+        eval "$FILTERED_LOG_FILE" | awk -F ';' '{
+          if ($3=="sell"){q1+=+$4*$6}
+          else{q2+=$4*$6}}
+          END {printf("%.2f\n", q1-q2)
+        }'
+    ;;
+    pos)
+        eval "$FILTERED_LOG_FILE" | awk -F ';' '{temp[$2]=$4}
+          {if($3 == "buy"){
+               temp_pos[$2] += $6
+             }
+             else{
+               temp_pos[$2] -= $6
+             }
+          }
+          END{
+             for(ticker in temp){
+               if(length(temp[ticker]*temp_pos[ticker])>longest){
+               longest=length(temp[ticker]*temp_pos[ticker])
+               }
+             }
+             for(ticker in temp){
+               printf("%-9s : %*.2f\n",ticker,longest,temp[ticker]*temp_pos[ticker])
+             }
+           }' | sort -nrk3
+
+    ;;
+    last-price)
+        eval "$FILTERED_LOG_FILE" | awk -F ';' '{temp[$2]=$4}
+          END{
+            for(ticker in temp){
+	            if(length(temp[ticker])>longest){
+	            longest=length(temp[ticker])
+		          }
+	          }
+            for(ticker in temp){
+	            printf("%-9s : %*s\n",ticker,longest,temp[ticker])
+            }
+          }' | sort
+    ;;
+    hist-ord)
+        eval "$FILTERED_LOG_FILE" | awk -F ';' -v width="$WIDTH" '{temp[$2]+=1}
+          END {
+            if (width != "") {
+                for (ticker in temp) {
+                    if (temp[ticker] > longest) {
+                        longest = temp[ticker]
+                    }
+                };
+                {
+                    for (ticker in temp) {
+                        times = temp[ticker]
+                        temp[ticker] = (times / longest) * width
+                        str=sprintf("%*c", temp[ticker], "#")
+                        gsub(" ","#",str)
+                        printf("%-9s : %s\n", ticker, str)
+                    }
+                }
+           }
+           else {
+               for (ticker in temp) {
+                   str=sprintf("%*c", temp[ticker], "#")
+                   gsub(" ","#",str)
+                   printf("%-9s : %s\n", ticker, str)
+               }
+           }
+        }' | sort -u
+    ;;
+    graph-pos)
+      #NOT WORKING
+    ;;
+    # prints filtered logs if no command is set
+    *)
+        eval "$FILTERED_LOG_FILE"
+    ;;
+esac
